@@ -10,8 +10,10 @@ logger = logging.getLogger(__name__)
 
 BASE_URL_PROFILE = "https://public.tableau.com/profile/api"
 BASE_URL_PUBLIC = "https://public.tableau.com/public/apis"
+BASE_URL_BFF = "https://public.tableau.com/public/apis/bff/v2"
 
 WORKBOOKS_PAGE_SIZE = 50
+CATEGORIES_PAGE_SIZE = 500
 REQUEST_DELAY_SEC = 0.5
 MAX_RETRIES = 3
 
@@ -107,6 +109,49 @@ def fetch_all_workbook_details(username: str) -> list[dict]:
     return detailed
 
 
+def fetch_categories(username: str) -> list[dict]:
+    """Fetch workbooks with categories (includes reactionCounts)."""
+    all_items: list[dict] = []
+    start = 0
+
+    while True:
+        url = f"{BASE_URL_BFF}/author/{username}/categories"
+        params = {"startIndex": start, "pageSize": CATEGORIES_PAGE_SIZE}
+        data = _get_json(url, params)
+
+        if not data:
+            break
+
+        items = data.get("workbooksWithCategories", [])
+        if not items:
+            break
+
+        all_items.extend(items)
+        logger.info("Fetched %d category items (total: %d)", len(items), len(all_items))
+
+        if len(items) < CATEGORIES_PAGE_SIZE:
+            break
+
+        start += CATEGORIES_PAGE_SIZE
+        time.sleep(REQUEST_DELAY_SEC)
+
+    return all_items
+
+
+def build_reaction_map(category_items: list[dict]) -> dict[str, dict]:
+    """Build a mapping of workbookRepoUrl -> reactionCounts from categories data.
+
+    A workbook may appear in multiple categories; uses the first occurrence.
+    """
+    reaction_map: dict[str, dict] = {}
+    for item in category_items:
+        wb = item.get("workbook", {})
+        repo_url = wb.get("workbookRepoUrl", "")
+        if repo_url and repo_url not in reaction_map:
+            reaction_map[repo_url] = wb.get("reactionCounts", {})
+    return reaction_map
+
+
 def extract_master_row(wb: dict) -> dict:
     """Extract static/semi-static fields for the master sheet."""
     default_view = wb.get("defaultViewRepoUrl", "")
@@ -134,11 +179,19 @@ def extract_master_row(wb: dict) -> dict:
     }
 
 
-def extract_daily_row(wb: dict, fetch_date: str) -> dict:
-    """Extract daily transaction metrics."""
-    return {
+REACTION_TYPES = ["INSIGHTFUL", "SAD", "FAVORITE", "LOVE", "NOMINATE"]
+
+
+def extract_daily_row(
+    wb: dict, fetch_date: str, reaction_map: dict[str, dict] | None = None
+) -> dict:
+    """Extract daily transaction metrics including reaction counts."""
+    repo_url = wb.get("workbookRepoUrl", "")
+    reactions = (reaction_map or {}).get(repo_url, {})
+
+    row = {
         "fetchDate": fetch_date,
-        "workbookRepoUrl": wb.get("workbookRepoUrl", ""),
+        "workbookRepoUrl": repo_url,
         "title": wb.get("title", ""),
         "viewCount": wb.get("viewCount", 0),
         "numberOfFavorites": wb.get("numberOfFavorites", 0),
@@ -146,3 +199,7 @@ def extract_daily_row(wb: dict, fetch_date: str) -> dict:
         "lastUpdateDate": wb.get("lastUpdateDate", ""),
         "revision": wb.get("revision", ""),
     }
+    for rtype in REACTION_TYPES:
+        row[f"reaction_{rtype}"] = reactions.get(rtype, 0)
+
+    return row

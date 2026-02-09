@@ -6,7 +6,13 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-from src.tableau_api import extract_daily_row, extract_master_row, fetch_all_workbook_details
+from src.tableau_api import (
+    build_reaction_map,
+    extract_daily_row,
+    extract_master_row,
+    fetch_all_workbook_details,
+    fetch_categories,
+)
 from src.sheets_writer import open_spreadsheet, write_daily_sheet, write_master_sheet
 
 JST = timezone(timedelta(hours=9))
@@ -58,9 +64,15 @@ def main() -> None:
 
     logger.info("Fetched %d workbooks", len(workbooks))
 
+    # --- Fetch reaction counts from Categories API ---
+    logger.info("Fetching reaction counts from Categories API...")
+    category_items = fetch_categories(username)
+    reaction_map = build_reaction_map(category_items)
+    logger.info("Built reaction map for %d workbooks", len(reaction_map))
+
     # --- Prepare data ---
     master_rows = [extract_master_row(wb) for wb in workbooks]
-    daily_rows = [extract_daily_row(wb, fetch_date) for wb in workbooks]
+    daily_rows = [extract_daily_row(wb, fetch_date, reaction_map) for wb in workbooks]
 
     # --- Write to Google Sheets ---
     logger.info("Opening spreadsheet: %s", spreadsheet_id)
