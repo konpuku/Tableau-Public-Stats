@@ -147,11 +147,11 @@ def fetch_follow_list(username: str, follow_type: str) -> list[dict]:
         follow_type: 'followers' or 'following'.
     """
     all_users: list[dict] = []
-    start = 0
+    index = 0
 
     while True:
-        url = f"{BASE_URL_BFF}/author/{username}/{follow_type}"
-        params = {"startIndex": start, "pageSize": FOLLOW_PAGE_SIZE}
+        url = f"{BASE_URL_PROFILE}/{follow_type}/{username}"
+        params = {"count": FOLLOW_PAGE_SIZE, "index": index}
         data = _get_json(url, params)
 
         if not data:
@@ -167,7 +167,7 @@ def fetch_follow_list(username: str, follow_type: str) -> list[dict]:
         if len(users) < FOLLOW_PAGE_SIZE:
             break
 
-        start += FOLLOW_PAGE_SIZE
+        index += FOLLOW_PAGE_SIZE
         time.sleep(REQUEST_DELAY_SEC)
 
     return all_users

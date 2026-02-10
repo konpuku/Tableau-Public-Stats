@@ -285,11 +285,12 @@ function buildCategoryMap_(categoryItems) {
  */
 function fetchFollowList_(username, type) {
   const allUsers = [];
-  let start = 0;
+  let index = 0;
+  const count = FOLLOW_PAGE_SIZE;
 
   while (true) {
-    const params = { startIndex: start, pageSize: FOLLOW_PAGE_SIZE };
-    const data = getJson_(`${BASE_URL_BFF}/author/${username}/${type}`, params);
+    const params = { count: count, index: index };
+    const data = getJson_(`${BASE_URL_PROFILE}/${type}/${username}`, params);
 
     if (!data) break;
 
@@ -299,9 +300,9 @@ function fetchFollowList_(username, type) {
     allUsers.push(...users);
     console.log(`Fetched ${users.length} ${type} (total: ${allUsers.length})`);
 
-    if (users.length < FOLLOW_PAGE_SIZE) break;
+    if (users.length < count) break;
 
-    start += FOLLOW_PAGE_SIZE;
+    index += count;
     Utilities.sleep(REQUEST_DELAY_MS);
   }
 
