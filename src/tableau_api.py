@@ -152,19 +152,46 @@ def build_reaction_map(category_items: list[dict]) -> dict[str, dict]:
     return reaction_map
 
 
-def extract_master_row(wb: dict) -> dict:
+def build_category_map(category_items: list[dict]) -> dict[str, list[str]]:
+    """Build a mapping of workbookRepoUrl -> list of categoryNames.
+
+    A workbook may appear in multiple categories.
+    """
+    category_map: dict[str, list[str]] = {}
+    for item in category_items:
+        wb = item.get("workbook", {})
+        repo_url = wb.get("workbookRepoUrl", "")
+        category_name = item.get("categoryName", "")
+        if repo_url and category_name:
+            if repo_url in category_map:
+                if category_name not in category_map[repo_url]:
+                    category_map[repo_url].append(category_name)
+            else:
+                category_map[repo_url] = [category_name]
+    return category_map
+
+
+def extract_master_row(
+    wb: dict, category_map: dict[str, list[str]] | None = None
+) -> dict:
     """Extract static/semi-static fields for the master sheet."""
     default_view = wb.get("defaultViewRepoUrl", "")
     repo_url = wb.get("workbookRepoUrl", "")
     viz_url = ""
+    thumbnail_url = ""
     if repo_url and default_view:
         viz_url = f"https://public.tableau.com/views/{repo_url}/{default_view}"
+        prefix = repo_url[:2]
+        thumbnail_url = f"https://public.tableau.com/static/images/{prefix}/{repo_url}/{default_view}/1.png"
+
+    categories = (category_map or {}).get(repo_url, [])
 
     return {
         "workbookRepoUrl": repo_url,
         "title": wb.get("title", ""),
         "description": wb.get("description", ""),
         "vizUrl": viz_url,
+        "thumbnailUrl": thumbnail_url,
         "authorProfileName": wb.get("authorProfileName", ""),
         "firstPublishDate": wb.get("firstPublishDate", ""),
         "lastPublishDate": wb.get("lastPublishDate", ""),
@@ -175,7 +202,7 @@ def extract_master_row(wb: dict) -> dict:
         "showInProfile": wb.get("showInProfile", ""),
         "revision": wb.get("revision", ""),
         "size": wb.get("size", ""),
-        "category": wb.get("category", ""),
+        "category": ", ".join(categories),
     }
 
 

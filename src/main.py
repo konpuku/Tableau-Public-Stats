@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 from src.tableau_api import (
+    build_category_map,
     build_reaction_map,
     extract_daily_row,
     extract_master_row,
@@ -68,10 +69,12 @@ def main() -> None:
     logger.info("Fetching reaction counts from Categories API...")
     category_items = fetch_categories(username)
     reaction_map = build_reaction_map(category_items)
-    logger.info("Built reaction map for %d workbooks", len(reaction_map))
+    category_map = build_category_map(category_items)
+    logger.info("Built reaction map for %d workbooks, category map for %d workbooks",
+                len(reaction_map), len(category_map))
 
     # --- Prepare data ---
-    master_rows = [extract_master_row(wb) for wb in workbooks]
+    master_rows = [extract_master_row(wb, category_map) for wb in workbooks]
     daily_rows = [extract_daily_row(wb, fetch_date, reaction_map) for wb in workbooks]
 
     # --- Write to Google Sheets ---

@@ -43,7 +43,7 @@ const EXECUTION_LIMIT_MS = 6 * 60 * 1000;
 const MASTER_SHEET_NAME = 'workbooks_master';
 
 const MASTER_HEADERS = [
-  'workbookRepoUrl', 'title', 'description', 'vizUrl',
+  'workbookRepoUrl', 'title', 'description', 'vizUrl', 'thumbnailUrl',
   'authorProfileName', 'firstPublishDate', 'lastPublishDate',
   'lastUpdateDate', 'defaultViewName', 'defaultViewRepoUrl',
   'showTabs', 'showInProfile', 'revision', 'size', 'category',
@@ -241,23 +241,52 @@ function buildReactionMap_(categoryItems) {
   return reactionMap;
 }
 
+/**
+ * Build a mapping of workbookRepoUrl -> comma-separated category names.
+ * A workbook may appear in multiple categories.
+ */
+function buildCategoryMap_(categoryItems) {
+  const categoryMap = {};
+  for (const item of categoryItems) {
+    const wb = item.workbook || {};
+    const repoUrl = wb.workbookRepoUrl || '';
+    const categoryName = item.categoryName || '';
+    if (repoUrl && categoryName) {
+      if (repoUrl in categoryMap) {
+        if (!categoryMap[repoUrl].includes(categoryName)) {
+          categoryMap[repoUrl].push(categoryName);
+        }
+      } else {
+        categoryMap[repoUrl] = [categoryName];
+      }
+    }
+  }
+  return categoryMap;
+}
+
 // ===================
 // Data Extraction
 // ===================
 
-function extractMasterRow_(wb) {
+function extractMasterRow_(wb, categoryMap) {
   const defaultView = wb.defaultViewRepoUrl || '';
   const repoUrl = wb.workbookRepoUrl || '';
   let vizUrl = '';
+  let thumbnailUrl = '';
   if (repoUrl && defaultView) {
     vizUrl = `https://public.tableau.com/views/${repoUrl}/${defaultView}`;
+    const prefix = repoUrl.substring(0, 2);
+    thumbnailUrl = `https://public.tableau.com/static/images/${prefix}/${repoUrl}/${defaultView}/1.png`;
   }
+
+  const categories = (categoryMap || {})[repoUrl] || [];
 
   return {
     workbookRepoUrl: repoUrl,
     title: wb.title || '',
     description: wb.description || '',
     vizUrl: vizUrl,
+    thumbnailUrl: thumbnailUrl,
     authorProfileName: wb.authorProfileName || '',
     firstPublishDate: wb.firstPublishDate || '',
     lastPublishDate: wb.lastPublishDate || '',
@@ -268,7 +297,7 @@ function extractMasterRow_(wb) {
     showInProfile: wb.showInProfile != null ? String(wb.showInProfile) : '',
     revision: wb.revision != null ? String(wb.revision) : '',
     size: wb.size != null ? String(wb.size) : '',
-    category: wb.category || '',
+    category: categories.join(', '),
   };
 }
 
@@ -491,10 +520,11 @@ function main() {
   console.log('Fetching reaction counts from Categories API...');
   const categoryItems = fetchCategories_(username);
   const reactionMap = buildReactionMap_(categoryItems);
-  console.log(`Built reaction map for ${Object.keys(reactionMap).length} workbooks`);
+  const categoryMap = buildCategoryMap_(categoryItems);
+  console.log(`Built reaction map for ${Object.keys(reactionMap).length} workbooks, category map for ${Object.keys(categoryMap).length} workbooks`);
 
   // Prepare data
-  const masterRows = allDetailed.map(wb => extractMasterRow_(wb));
+  const masterRows = allDetailed.map(wb => extractMasterRow_(wb, categoryMap));
   const dailyRows = allDetailed.map(wb => extractDailyRow_(wb, fetchDate, reactionMap));
 
   // Write to sheets

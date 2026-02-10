@@ -19,6 +19,7 @@ MASTER_HEADERS = [
     "title",
     "description",
     "vizUrl",
+    "thumbnailUrl",
     "authorProfileName",
     "firstPublishDate",
     "lastPublishDate",
