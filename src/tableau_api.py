@@ -14,6 +14,7 @@ BASE_URL_BFF = "https://public.tableau.com/public/apis/bff/v2"
 
 WORKBOOKS_PAGE_SIZE = 50
 CATEGORIES_PAGE_SIZE = 500
+FOLLOW_PAGE_SIZE = 500
 REQUEST_DELAY_SEC = 0.5
 MAX_RETRIES = 3
 
@@ -136,6 +137,40 @@ def fetch_categories(username: str) -> list[dict]:
         time.sleep(REQUEST_DELAY_SEC)
 
     return all_items
+
+
+def fetch_follow_list(username: str, follow_type: str) -> list[dict]:
+    """Fetch followers or following list with pagination.
+
+    Args:
+        username: Tableau Public profile name.
+        follow_type: 'followers' or 'following'.
+    """
+    all_users: list[dict] = []
+    start = 0
+
+    while True:
+        url = f"{BASE_URL_BFF}/author/{username}/{follow_type}"
+        params = {"startIndex": start, "pageSize": FOLLOW_PAGE_SIZE}
+        data = _get_json(url, params)
+
+        if not data:
+            break
+
+        users = data.get("authorFeedInfos", [])
+        if not users:
+            break
+
+        all_users.extend(users)
+        logger.info("Fetched %d %s (total: %d)", len(users), follow_type, len(all_users))
+
+        if len(users) < FOLLOW_PAGE_SIZE:
+            break
+
+        start += FOLLOW_PAGE_SIZE
+        time.sleep(REQUEST_DELAY_SEC)
+
+    return all_users
 
 
 def build_reaction_map(category_items: list[dict]) -> dict[str, dict]:

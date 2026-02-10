@@ -58,6 +58,20 @@ const DAILY_HEADERS = [
 
 const REACTION_TYPES = ['INSIGHTFUL', 'SAD', 'FAVORITE', 'LOVE', 'NOMINATE'];
 
+const FOLLOWERS_MASTER_NAME = 'followers_master';
+const FOLLOWING_MASTER_NAME = 'following_master';
+const FOLLOW_PAGE_SIZE = 500;
+
+const FOLLOW_MASTER_HEADERS = [
+  'profileName', 'name', 'address', 'avatarUrl',
+  'visibleWorkbookCount', 'totalNumberOfFollowing', 'totalNumberOfFollowers',
+  'pronouns', 'firstSeenDate', 'lastSeenDate',
+];
+
+const PROFILE_DAILY_HEADERS = [
+  'fetchDate', 'followersCount', 'followingCount',
+];
+
 /** Script Properties key for continuation state. */
 const STATE_KEY = 'CONTINUATION_STATE';
 
@@ -264,6 +278,36 @@ function buildCategoryMap_(categoryItems) {
   return categoryMap;
 }
 
+/**
+ * Fetch followers or following list with pagination.
+ * @param {string} username
+ * @param {string} type - 'followers' or 'following'
+ */
+function fetchFollowList_(username, type) {
+  const allUsers = [];
+  let start = 0;
+
+  while (true) {
+    const params = { startIndex: start, pageSize: FOLLOW_PAGE_SIZE };
+    const data = getJson_(`${BASE_URL_BFF}/author/${username}/${type}`, params);
+
+    if (!data) break;
+
+    const users = data.authorFeedInfos || [];
+    if (users.length === 0) break;
+
+    allUsers.push(...users);
+    console.log(`Fetched ${users.length} ${type} (total: ${allUsers.length})`);
+
+    if (users.length < FOLLOW_PAGE_SIZE) break;
+
+    start += FOLLOW_PAGE_SIZE;
+    Utilities.sleep(REQUEST_DELAY_MS);
+  }
+
+  return allUsers;
+}
+
 // ===================
 // Data Extraction
 // ===================
@@ -387,6 +431,88 @@ function writeDailySheet_(spreadsheet, yearMonth, dailyRows, fetchDate) {
   const startRow = existing.length + 1;
   sheet.getRange(startRow, 1, newRows.length, DAILY_HEADERS.length).setValues(newRows);
   console.log(`Appended ${newRows.length} rows to ${sheetName} for date ${fetchDate}`);
+}
+
+/**
+ * Merge-update a follow master sheet (followers_master or following_master).
+ *
+ * - Existing users: update all fields but preserve firstSeenDate.
+ * - New users: set firstSeenDate = fetchDate.
+ * - Users no longer in the API response are removed (they unfollowed / were unfollowed).
+ */
+function writeFollowMasterSheet_(spreadsheet, sheetName, users, fetchDate) {
+  const sheet = getOrCreateSheet_(spreadsheet, sheetName, FOLLOW_MASTER_HEADERS);
+
+  // Read existing data to preserve firstSeenDate
+  const existing = sheet.getDataRange().getValues();
+  const profileIdx = FOLLOW_MASTER_HEADERS.indexOf('profileName');
+  const firstSeenIdx = FOLLOW_MASTER_HEADERS.indexOf('firstSeenDate');
+
+  const existingFirstSeen = {};
+  for (let i = 1; i < existing.length; i++) {
+    const row = existing[i];
+    const pn = row.length > profileIdx ? String(row[profileIdx]) : '';
+    const fs = row.length > firstSeenIdx ? String(row[firstSeenIdx]) : '';
+    if (pn) {
+      existingFirstSeen[pn] = fs || fetchDate;
+    }
+  }
+
+  // Build rows from current API data
+  const rows = [FOLLOW_MASTER_HEADERS];
+  for (const user of users) {
+    const profileName = user.profileName || '';
+    const firstSeen = existingFirstSeen[profileName] || fetchDate;
+
+    rows.push(FOLLOW_MASTER_HEADERS.map(h => {
+      if (h === 'firstSeenDate') return firstSeen;
+      if (h === 'lastSeenDate') return fetchDate;
+      const val = user[h];
+      return val != null ? String(val) : '';
+    }));
+  }
+
+  // Clear and rewrite
+  sheet.clear();
+  if (sheet.getMaxRows() < rows.length) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), rows.length - sheet.getMaxRows());
+  }
+  sheet.getRange(1, 1, rows.length, FOLLOW_MASTER_HEADERS.length).setValues(rows);
+  console.log(`Updated ${sheetName} with ${users.length} users`);
+}
+
+/**
+ * Append a daily profile row (followers/following counts).
+ * One row per day in a monthly sheet (daily_profile_YYYYMM).
+ */
+function writeProfileDailySheet_(spreadsheet, yearMonth, followersCount, followingCount, fetchDate) {
+  const sheetName = `daily_profile_${yearMonth}`;
+  const sheet = getOrCreateSheet_(spreadsheet, sheetName, PROFILE_DAILY_HEADERS);
+
+  // Duplicate check
+  const existing = sheet.getDataRange().getValues();
+  const dateColIdx = PROFILE_DAILY_HEADERS.indexOf('fetchDate');
+  const existingDates = new Set(
+    existing.slice(1)
+      .filter(row => row.length > dateColIdx)
+      .map(row => String(row[dateColIdx]))
+  );
+
+  if (existingDates.has(fetchDate)) {
+    console.log(`Profile data for ${fetchDate} already exists in ${sheetName}, skipping`);
+    return;
+  }
+
+  const newRow = [fetchDate, followersCount, followingCount];
+
+  // Expand if needed
+  if (sheet.getMaxRows() < existing.length + 1) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), 100);
+  }
+
+  const startRow = existing.length + 1;
+  sheet.getRange(startRow, 1, 1, PROFILE_DAILY_HEADERS.length).setValues([newRow]);
+  console.log(`Appended profile daily row to ${sheetName}: followers=${followersCount}, following=${followingCount}`);
 }
 
 // ===================
@@ -527,10 +653,22 @@ function main() {
   const masterRows = allDetailed.map(wb => extractMasterRow_(wb, categoryMap));
   const dailyRows = allDetailed.map(wb => extractDailyRow_(wb, fetchDate, reactionMap));
 
+  // Fetch followers/following
+  console.log('Fetching followers...');
+  const followers = fetchFollowList_(username, 'followers');
+  console.log(`Fetched ${followers.length} followers`);
+
+  console.log('Fetching following...');
+  const following = fetchFollowList_(username, 'following');
+  console.log(`Fetched ${following.length} following`);
+
   // Write to sheets
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   writeMasterSheet_(spreadsheet, masterRows);
   writeDailySheet_(spreadsheet, yearMonth, dailyRows, fetchDate);
+  writeFollowMasterSheet_(spreadsheet, FOLLOWERS_MASTER_NAME, followers, fetchDate);
+  writeFollowMasterSheet_(spreadsheet, FOLLOWING_MASTER_NAME, following, fetchDate);
+  writeProfileDailySheet_(spreadsheet, yearMonth, followers.length, following.length, fetchDate);
 
   cleanupTriggers_();
 

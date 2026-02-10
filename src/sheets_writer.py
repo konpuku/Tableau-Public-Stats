@@ -49,6 +49,25 @@ DAILY_HEADERS = [
     "revision",
 ]
 
+FOLLOW_MASTER_HEADERS = [
+    "profileName",
+    "name",
+    "address",
+    "avatarUrl",
+    "visibleWorkbookCount",
+    "totalNumberOfFollowing",
+    "totalNumberOfFollowers",
+    "pronouns",
+    "firstSeenDate",
+    "lastSeenDate",
+]
+
+PROFILE_DAILY_HEADERS = [
+    "fetchDate",
+    "followersCount",
+    "followingCount",
+]
+
 
 def _authorize(credentials_path: str) -> gspread.Client:
     """Authorize gspread client with service account credentials."""
@@ -141,6 +160,96 @@ def write_daily_sheet(
     sheet.append_rows(new_rows, value_input_option="RAW")
     logger.info(
         "Appended %d rows to %s for date %s", len(new_rows), sheet_name, fetch_date
+    )
+
+
+def write_follow_master_sheet(
+    spreadsheet: gspread.Spreadsheet,
+    sheet_name: str,
+    users: list[dict],
+    fetch_date: str,
+) -> None:
+    """Merge-update a follow master sheet (followers_master or following_master).
+
+    Existing users: update all fields but preserve firstSeenDate.
+    New users: set firstSeenDate = fetch_date.
+    Users no longer in the API response are removed.
+    """
+    sheet = _get_or_create_sheet(spreadsheet, sheet_name, FOLLOW_MASTER_HEADERS)
+
+    # Read existing data to preserve firstSeenDate
+    existing = sheet.get_all_values()
+    profile_idx = FOLLOW_MASTER_HEADERS.index("profileName")
+    first_seen_idx = FOLLOW_MASTER_HEADERS.index("firstSeenDate")
+
+    existing_first_seen: dict[str, str] = {}
+    for row in existing[1:]:
+        if len(row) > profile_idx and row[profile_idx]:
+            fs = row[first_seen_idx] if len(row) > first_seen_idx else ""
+            existing_first_seen[row[profile_idx]] = fs or fetch_date
+
+    # Build rows from current API data
+    rows = [FOLLOW_MASTER_HEADERS]
+    for user in users:
+        profile_name = user.get("profileName", "")
+        first_seen = existing_first_seen.get(profile_name, fetch_date)
+
+        row = []
+        for h in FOLLOW_MASTER_HEADERS:
+            if h == "firstSeenDate":
+                row.append(first_seen)
+            elif h == "lastSeenDate":
+                row.append(fetch_date)
+            else:
+                val = user.get(h)
+                row.append(str(val) if val is not None else "")
+        rows.append(row)
+
+    # Clear and rewrite
+    sheet.clear()
+    if sheet.row_count < len(rows):
+        sheet.resize(rows=len(rows))
+    sheet.update(rows, value_input_option="RAW")
+    logger.info("Updated %s with %d users", sheet_name, len(users))
+
+
+def write_profile_daily_sheet(
+    spreadsheet: gspread.Spreadsheet,
+    year_month: str,
+    followers_count: int,
+    following_count: int,
+    fetch_date: str,
+) -> None:
+    """Append a daily profile row (followers/following counts).
+
+    One row per day in a monthly sheet (daily_profile_YYYYMM).
+    """
+    sheet_name = f"daily_profile_{year_month}"
+    sheet = _get_or_create_sheet(spreadsheet, sheet_name, PROFILE_DAILY_HEADERS)
+
+    # Duplicate check
+    existing = sheet.get_all_values()
+    date_col_idx = PROFILE_DAILY_HEADERS.index("fetchDate")
+    existing_dates = {row[date_col_idx] for row in existing[1:] if len(row) > date_col_idx}
+
+    if fetch_date in existing_dates:
+        logger.info(
+            "Profile data for %s already exists in %s, skipping", fetch_date, sheet_name
+        )
+        return
+
+    new_row = [fetch_date, str(followers_count), str(following_count)]
+
+    current_rows = sheet.row_count
+    if current_rows < len(existing) + 1:
+        sheet.resize(rows=current_rows + 100)
+
+    sheet.append_row(new_row, value_input_option="RAW")
+    logger.info(
+        "Appended profile daily row to %s: followers=%d, following=%d",
+        sheet_name,
+        followers_count,
+        following_count,
     )
 
 

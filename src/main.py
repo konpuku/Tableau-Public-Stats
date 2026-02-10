@@ -13,8 +13,15 @@ from src.tableau_api import (
     extract_master_row,
     fetch_all_workbook_details,
     fetch_categories,
+    fetch_follow_list,
 )
-from src.sheets_writer import open_spreadsheet, write_daily_sheet, write_master_sheet
+from src.sheets_writer import (
+    open_spreadsheet,
+    write_daily_sheet,
+    write_follow_master_sheet,
+    write_master_sheet,
+    write_profile_daily_sheet,
+)
 
 JST = timezone(timedelta(hours=9))
 
@@ -88,7 +95,22 @@ def main() -> None:
     write_master_sheet(spreadsheet, master_rows)
     write_daily_sheet(spreadsheet, year_month, daily_rows, fetch_date)
 
-    logger.info("Done! Updated master sheet and appended daily stats for %s", fetch_date)
+    # --- Fetch and write followers/following ---
+    logger.info("Fetching followers...")
+    followers = fetch_follow_list(username, "followers")
+    logger.info("Fetched %d followers", len(followers))
+
+    logger.info("Fetching following...")
+    following = fetch_follow_list(username, "following")
+    logger.info("Fetched %d following", len(following))
+
+    write_follow_master_sheet(spreadsheet, "followers_master", followers, fetch_date)
+    write_follow_master_sheet(spreadsheet, "following_master", following, fetch_date)
+    write_profile_daily_sheet(
+        spreadsheet, year_month, len(followers), len(following), fetch_date
+    )
+
+    logger.info("Done! Updated all sheets for %s", fetch_date)
 
 
 if __name__ == "__main__":
