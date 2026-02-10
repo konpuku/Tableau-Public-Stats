@@ -60,7 +60,7 @@ const REACTION_TYPES = ['INSIGHTFUL', 'SAD', 'FAVORITE', 'LOVE', 'NOMINATE'];
 
 const FOLLOWERS_MASTER_NAME = 'followers_master';
 const FOLLOWING_MASTER_NAME = 'following_master';
-const FOLLOW_PAGE_SIZE = 500;
+const FOLLOW_PAGE_SIZE = 24;
 
 const FOLLOW_MASTER_HEADERS = [
   'profileName', 'name', 'address', 'avatarUrl',
