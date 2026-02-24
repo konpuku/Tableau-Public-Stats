@@ -9,13 +9,11 @@
  *   5. Set project timezone to Asia/Tokyo (Project Settings > General)
  *   6. Run main() manually or set a daily trigger
  *
- * Parallel fetch:
- *   Uses UrlFetchApp.fetchAll() to batch detail API requests.
- *   400 workbooks complete in ~30s instead of ~5min.
- *
- * Continuation:
- *   If execution nears the time limit, progress is saved and a one-off
- *   trigger resumes automatically within 1 minute.
+ * Bandwidth-efficient design:
+ *   Instead of fetching each workbook detail individually (400+ requests),
+ *   we use the workbook list API (paginated, ~8 requests) and the categories
+ *   API (1 request for 500 workbooks) as the data sources.
+ *   This reduces URL fetch bandwidth from ~20MB/day to ~2MB/day.
  */
 
 // ===================
@@ -30,15 +28,6 @@ const WORKBOOKS_PAGE_SIZE = 50;
 const CATEGORIES_PAGE_SIZE = 500;
 const REQUEST_DELAY_MS = 500;
 const MAX_RETRIES = 3;
-
-/** Number of detail requests sent in one fetchAll() call. */
-const DETAIL_BATCH_SIZE = 50;
-
-/** Stop fetching details when remaining time drops below this (ms). */
-const TIME_LIMIT_BUFFER_MS = 60 * 1000; // 60s safety margin
-
-/** GAS execution limit (ms). Free: 6min, Workspace: 30min. */
-const EXECUTION_LIMIT_MS = 6 * 60 * 1000;
 
 const MASTER_SHEET_NAME = 'workbooks_master';
 
@@ -71,9 +60,6 @@ const FOLLOW_MASTER_HEADERS = [
 const PROFILE_DAILY_HEADERS = [
   'fetchDate', 'followersCount', 'followingCount',
 ];
-
-/** Script Properties key for continuation state. */
-const STATE_KEY = 'CONTINUATION_STATE';
 
 // ===================
 // HTTP Helpers
@@ -110,33 +96,6 @@ function getJson_(url, params) {
   }
 }
 
-/**
- * Parallel GET requests via UrlFetchApp.fetchAll().
- * Returns an array of parsed JSON (null for failed requests).
- */
-function getJsonBatch_(urls) {
-  const requests = urls.map(url => ({
-    url: url,
-    muteHttpExceptions: true,
-  }));
-
-  const responses = UrlFetchApp.fetchAll(requests);
-
-  return responses.map((resp, i) => {
-    try {
-      const code = resp.getResponseCode();
-      if (code >= 200 && code < 300) {
-        return JSON.parse(resp.getContentText());
-      }
-      console.warn(`Batch request failed for ${urls[i]}: HTTP ${code}`);
-      return null;
-    } catch (e) {
-      console.warn(`Failed to parse response for ${urls[i]}: ${e.message}`);
-      return null;
-    }
-  });
-}
-
 // ===================
 // Tableau API
 // ===================
@@ -169,53 +128,6 @@ function fetchWorkbookList_(username) {
   }
 
   return allWorkbooks;
-}
-
-/**
- * Fetch workbook details in parallel batches using fetchAll().
- *
- * @param {string[]} repoUrls - List of workbookRepoUrl to fetch.
- * @param {number}   startIdx - Index to resume from (for continuation).
- * @param {Date}     deadline - Stop before this time and save state.
- * @returns {{ detailed: object[], nextIdx: number|null }}
- *   nextIdx is null if all done, otherwise the index to resume from.
- */
-function fetchWorkbookDetailsBatch_(repoUrls, startIdx, deadline) {
-  const detailed = [];
-  let i = startIdx;
-
-  while (i < repoUrls.length) {
-    // Check time budget before starting a new batch
-    if (new Date() >= deadline) {
-      console.warn(`Approaching time limit at index ${i}/${repoUrls.length}, saving state...`);
-      return { detailed, nextIdx: i };
-    }
-
-    const batchEnd = Math.min(i + DETAIL_BATCH_SIZE, repoUrls.length);
-    const batchUrls = repoUrls.slice(i, batchEnd).map(
-      repoUrl => `${BASE_URL_PROFILE}/single_workbook/${repoUrl}`
-    );
-
-    const results = getJsonBatch_(batchUrls);
-
-    for (let j = 0; j < results.length; j++) {
-      if (results[j]) {
-        detailed.push(results[j]);
-      } else {
-        console.warn(`Failed to fetch detail for '${repoUrls[i + j]}'`);
-      }
-    }
-
-    console.log(`Detail batch done: ${batchEnd} / ${repoUrls.length}`);
-    i = batchEnd;
-
-    // Brief pause between batches to avoid rate limiting
-    if (i < repoUrls.length) {
-      Utilities.sleep(REQUEST_DELAY_MS);
-    }
-  }
-
-  return { detailed, nextIdx: null };
 }
 
 function fetchCategories_(username) {
@@ -276,6 +188,23 @@ function buildCategoryMap_(categoryItems) {
     }
   }
   return categoryMap;
+}
+
+/**
+ * Build a mapping of workbookRepoUrl -> workbook object from category items.
+ * The categories API returns workbook objects that may include fields (e.g.
+ * description) not present in the workbook list response.
+ */
+function buildWorkbookDetailMap_(categoryItems) {
+  const map = {};
+  for (const item of categoryItems) {
+    const wb = item.workbook || {};
+    const repoUrl = wb.workbookRepoUrl || '';
+    if (repoUrl && !(repoUrl in map)) {
+      map[repoUrl] = wb;
+    }
+  }
+  return map;
 }
 
 /**
@@ -517,61 +446,11 @@ function writeProfileDailySheet_(spreadsheet, yearMonth, followersCount, followi
 }
 
 // ===================
-// Continuation State
-// ===================
-
-function saveState_(state) {
-  PropertiesService.getScriptProperties().setProperty(STATE_KEY, JSON.stringify(state));
-}
-
-function loadState_() {
-  const raw = PropertiesService.getScriptProperties().getProperty(STATE_KEY);
-  return raw ? JSON.parse(raw) : null;
-}
-
-function clearState_() {
-  PropertiesService.getScriptProperties().deleteProperty(STATE_KEY);
-}
-
-/**
- * Schedule a one-off trigger to call main() in ~1 minute.
- */
-function scheduleResume_() {
-  ScriptApp.newTrigger('main')
-    .timeBased()
-    .after(1 * 60 * 1000)
-    .create();
-  console.log('Scheduled continuation trigger (1 min)');
-}
-
-/**
- * Delete any one-off triggers for main() created by continuation.
- * Called at the end of a successful complete run.
- */
-function cleanupTriggers_() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (const trigger of triggers) {
-    if (trigger.getHandlerFunction() === 'main'
-        && trigger.getTriggerSource() === ScriptApp.TriggerSource.CLOCK
-        && trigger.getEventType() === ScriptApp.EventType.CLOCK) {
-      // Only delete after-style triggers (one-off), not daily recurring ones.
-      // after() triggers appear as CLOCK / CLOCK and don't have a specific hour.
-      try {
-        ScriptApp.deleteTrigger(trigger);
-      } catch (e) {
-        // Ignore - might be the daily trigger
-      }
-    }
-  }
-}
-
-// ===================
 // Entry Point
 // ===================
 
 function main() {
   const startTime = new Date();
-  const deadline = new Date(startTime.getTime() + EXECUTION_LIMIT_MS - TIME_LIMIT_BUFFER_MS);
 
   const username = PropertiesService.getScriptProperties().getProperty('TABLEAU_USERNAME');
   if (!username) {
@@ -582,77 +461,40 @@ function main() {
   const fetchDate = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
   const yearMonth = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyyMM');
 
-  // --- Check for continuation state ---
-  const saved = loadState_();
+  console.log(`Fetch date: ${fetchDate} (JST)`);
 
-  let repoUrls;
-  let detailedSoFar;
-  let resumeIdx;
-
-  if (saved && saved.fetchDate === fetchDate) {
-    // Resuming a previous run
-    repoUrls = saved.repoUrls;
-    detailedSoFar = saved.detailed;
-    resumeIdx = saved.nextIdx;
-    console.log(`Resuming from index ${resumeIdx}/${repoUrls.length} (${detailedSoFar.length} already fetched)`);
-  } else {
-    // Fresh run
-    if (saved) {
-      console.log('Stale continuation state found, discarding');
-      clearState_();
-    }
-
-    console.log(`Fetch date: ${fetchDate} (JST)`);
-    console.log(`Fetching workbook list for user: ${username}`);
-
-    const workbooks = fetchWorkbookList_(username);
-    if (workbooks.length === 0) {
-      console.warn(`No workbooks found for user: ${username}`);
-      return;
-    }
-
-    repoUrls = workbooks
-      .map(wb => wb.workbookRepoUrl || '')
-      .filter(url => url !== '');
-    console.log(`Found ${repoUrls.length} workbooks to fetch details for`);
-
-    detailedSoFar = [];
-    resumeIdx = 0;
-  }
-
-  // --- Fetch workbook details in parallel batches ---
-  const { detailed: newDetailed, nextIdx } = fetchWorkbookDetailsBatch_(
-    repoUrls, resumeIdx, deadline
-  );
-  const allDetailed = detailedSoFar.concat(newDetailed);
-
-  if (nextIdx !== null) {
-    // Time ran out — save state and schedule continuation
-    console.warn(`Time limit approaching. Fetched ${allDetailed.length}/${repoUrls.length}. Saving state...`);
-    saveState_({
-      fetchDate: fetchDate,
-      repoUrls: repoUrls,
-      detailed: allDetailed,
-      nextIdx: nextIdx,
-    });
-    scheduleResume_();
+  // Fetch workbook list (paginated, ~8 requests for 400 workbooks)
+  console.log(`Fetching workbook list for user: ${username}`);
+  const workbooks = fetchWorkbookList_(username);
+  if (workbooks.length === 0) {
+    console.warn(`No workbooks found for user: ${username}`);
     return;
   }
+  console.log(`Fetched ${workbooks.length} workbooks`);
 
-  // --- All details fetched — continue to categories + write ---
-  clearState_();
-  console.log(`Fetched all ${allDetailed.length} workbook details`);
-
-  // Fetch reaction counts
+  // Fetch categories (1–2 requests for 500 workbooks/page):
+  //   - reaction counts per workbook
+  //   - category assignments
+  //   - supplementary workbook fields (e.g. description) not in the list API
   console.log('Fetching reaction counts from Categories API...');
   const categoryItems = fetchCategories_(username);
   const reactionMap = buildReactionMap_(categoryItems);
   const categoryMap = buildCategoryMap_(categoryItems);
-  console.log(`Built reaction map for ${Object.keys(reactionMap).length} workbooks, category map for ${Object.keys(categoryMap).length} workbooks`);
+  const wbDetailMap = buildWorkbookDetailMap_(categoryItems);
+  console.log(`Built maps for ${Object.keys(reactionMap).length} workbooks`);
 
-  // Prepare data
-  const masterRows = allDetailed.map(wb => extractMasterRow_(wb, categoryMap));
-  const dailyRows = allDetailed.map(wb => extractDailyRow_(wb, fetchDate, reactionMap));
+  // Merge list data with category workbook data.
+  // Category data supplies fields like `description` that may be absent from
+  // the list response; list data takes precedence for fresh metrics
+  // (viewCount, numberOfFavorites, revision, etc.).
+  const allWorkbooks = workbooks.map(wb => {
+    const repoUrl = wb.workbookRepoUrl || '';
+    const catDetail = wbDetailMap[repoUrl] || {};
+    return Object.assign({}, catDetail, wb);
+  });
+
+  const masterRows = allWorkbooks.map(wb => extractMasterRow_(wb, categoryMap));
+  const dailyRows = allWorkbooks.map(wb => extractDailyRow_(wb, fetchDate, reactionMap));
 
   // Fetch followers/following
   console.log('Fetching followers...');
@@ -671,8 +513,6 @@ function main() {
   writeFollowMasterSheet_(spreadsheet, FOLLOWING_MASTER_NAME, following, fetchDate);
   writeProfileDailySheet_(spreadsheet, yearMonth, followers.length, following.length, fetchDate);
 
-  cleanupTriggers_();
-
   const elapsed = ((new Date() - startTime) / 1000).toFixed(1);
-  console.log(`Done! ${allDetailed.length} workbooks processed in ${elapsed}s`);
+  console.log(`Done! ${allWorkbooks.length} workbooks processed in ${elapsed}s`);
 }
