@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # ピン留めした GitHub Actions の SHA を週次で更新する
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
